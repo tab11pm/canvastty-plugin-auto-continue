@@ -1,0 +1,32 @@
+{
+  "apiVersion": 2,
+  "id": "dev.tab11pm.auto-continue",
+  "name": "Auto Continue",
+  "version": "0.3.0",
+  "description": "Continues agents stopped at their usage limit in their own CanvasTTY card: the reset time comes from CanvasTTY's limits and the continue message is typed into that card after the reset.",
+  "description.ru": "Продолжает агентов, упёршихся в лимит, в их же карточке CanvasTTY: время сброса берётся из лимитов CanvasTTY, после сброса в эту карточку пишется сообщение «продолжай».",
+  "description.en": "Continues agents stopped at their usage limit in their own CanvasTTY card: the reset time comes from CanvasTTY's limits and the continue message is typed into that card after the reset.",
+  "author": "tab11pm",
+  "platforms": [
+    "canvastty"
+  ],
+  "minHostVersion": "1.8.5",
+  "permissions": [
+    "storage",
+    "limits:read",
+    "sessions:events",
+    "sessions:read-screen",
+    "sessions:control",
+    "sessions:control-any",
+    "cards:decorate"
+  ],
+  "services": [
+    {
+      "id": "continue",
+      "title": "Auto Continue",
+      "description": "Watches agent cards for a usage-limit stop, takes the reset time from CanvasTTY's limits, and types the continue message into the same card after the reset.",
+      "entry": "services/auto-continue.mjs"
+    }
+  ],
+  "contributions": []
+}
