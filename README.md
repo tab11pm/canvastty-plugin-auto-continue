@@ -26,7 +26,7 @@ An agent started by hand in a plain terminal card is not resumed: CanvasTTY lets
 
 ## Settings
 
-Optional `~/.config/canvastty/plugin-data/dev.tab11pm.auto-continue/settings.json`: `resumeMessage` (default: "The usage limit has reset. Continue the task from where you stopped and finish it."), `graceMs` (wait after the reset, 20 s), `tickMs`, `lookupRetryMs`, `lookupSlowMs`, `verifyMs`, `retryMs`, `maxAttempts`.
+Optional `~/.config/canvastty/plugin-data/dev.tab11pm.auto-continue/settings.json`: `resumeMessage` (default: "The usage limit has reset. Continue the task from where you stopped and finish it."), `graceMs` (wait after the reset, 20 s), `tickMs`, `lookupRetryMs`, `lookupSlowMs`, `maxLookups` (lookups without a full limit window before the stop is dropped as a false one, 8), `verifyMs`, `retryMs`, `maxAttempts`.
 
 Test mode, to see a resume land without a real limit: `{"testCardTitle": "auto continue test", "testResetInMs": 60000}`, then restart the service and open a Claude card titled `auto continue test`. About a minute later the resume message is typed into it (once per card until the service restarts). Remove the keys afterwards.
 

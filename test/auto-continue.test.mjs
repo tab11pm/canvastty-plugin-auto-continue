@@ -12,7 +12,7 @@ const entry = fileURLToPath(new URL('../services/auto-continue.mjs', import.meta
 const MENU = "⎿  You've hit your limit · resets 3am (Asia/Novosibirsk)\n What do you want to do?\n ❯ 1. Upgrade your plan\n   2. Stop and wait for limit to reset\n Enter to confirm · Esc to cancel";
 const CLAUDE_BANNER = "● Working on the parser…\n⎿  5-hour limit reached ∙ resets 3am\n   /upgrade to increase your usage limit.\n\n❯ ";
 const CODEX_BANNER = "■ You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing) or try again at 9:12 PM.\n\n› ";
-const options = { graceMs: 0, verifyMs: 1_000, retryMs: 5_000, maxAttempts: 3 };
+const options = { graceMs: 0, verifyMs: 1_000, retryMs: 5_000, maxAttempts: 3, maxLookups: 4 };
 
 test('limit stops are recognised at the end of the screen, for Claude and Codex', () => {
   assert.equal(showsLimitMenu(MENU), true);
@@ -57,6 +57,10 @@ test('job steps: locate, wait, send through the menu, confirm, retry, drop', () 
   const job = { cardId: 'c', agent: 'claude', resetAt: 100, attempts: 0, lookups: 0, phase: 'waiting', due: 100 };
   const idle = { id: 'c', status: 'idle', exitCode: null };
   assert.equal(nextAction({ ...job, phase: 'locating', due: 0 }, idle, '', 50, options).kind, 'locate');
+  assert.equal(nextAction({ ...job, phase: 'locating', due: 0, lookups: options.maxLookups }, idle, '', 50, options).kind, 'drop',
+    'no full window after every lookup: not a real stop');
+  assert.equal(nextAction({ ...job, phase: 'sending' }, { ...idle, status: 'working' }, '', 100, options).kind, 'wait',
+    'the turn its own resume starts is not the person continuing');
   assert.equal(nextAction(job, idle, MENU, 50, options).kind, 'wait');
   assert.equal(nextAction(job, idle, MENU, 100, options).kind, 'dismiss-and-send');
   assert.equal(nextAction(job, idle, '❯ ', 100, options).kind, 'send');
@@ -141,4 +145,54 @@ test('the service sees the stop, takes the reset from CanvasTTY limits and resum
   assert.match(badges[1].text, /^⏸ до \d\d:\d\d$/u);
   assert.equal(badges.at(-1), null);
   assert.deepEqual(calls.find((call) => call.method === 'sessions.send').params, { sessionId: 'card-1', text: 'continue please', submit: true });
+});
+
+/** The person continues by hand before the reset with a turn shorter than a tick: the plugin never types. */
+test('a short turn the person starts before the reset drops the job even between ticks', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'auto-continue-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, 'settings.json'), JSON.stringify({ graceMs: 0, tickMs: 60_000 }));
+
+  const card = { id: 'card-1', provider: 'claude', role: 'agent', title: 'Mine', status: 'working', exitCode: null };
+  const calls = [];
+  const logs = [];
+  const child = spawn(process.execPath, [entry], { stdio: ['pipe', 'pipe', 'inherit'] });
+  t.after(() => child.kill());
+  const send = (message) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
+  const event = (screen) => send({ method: 'canvastty.sessions.event', params: { type: 'status', session: { ...card }, owned: false, screen } });
+  createInterface({ input: child.stdout }).on('line', (line) => {
+    const message = JSON.parse(line);
+    if (message.method === 'log') { logs.push(message.params.message); return; }
+    calls.push(message);
+    const reply = (result) => send({ id: message.id, result });
+    switch (message.method) {
+      case 'storage.get': case 'storage.set': case 'cards.setBadge': return reply(null);
+      case 'sessions.subscribe':
+        reply({ sessions: [{ ...card }] });
+        card.status = 'idle';
+        return event(MENU);
+      case 'sessions.list': return reply({ sessions: [{ ...card }] });
+      case 'limits.get':
+        reply({ state: 'ready', snapshot: { fetchedAt: Date.now(), providers: [
+          { provider: 'claude', state: 'available', windows: [{ usedPercent: 100, resetsAt: Date.now() + 60_000 }] }
+        ] } });
+        // Before any further tick: the person types, the turn runs and ends.
+        return setTimeout(() => {
+          card.status = 'working';
+          event('❯ go on');
+          card.status = 'idle';
+          event('Done.\n❯ ');
+        }, 100);
+      default:
+        if (message.id !== undefined) send({ id: message.id, error: { code: -32601, message: 'no' } });
+    }
+  });
+  send({ method: 'canvastty.initialize', params: { apiVersion: 2, pluginId: 'dev.tab11pm.auto-continue', serviceId: 'continue', dataDir: dir, locale: 'en' } });
+  const deadline = Date.now() + 8_000;
+  while (!logs.some((message) => message.includes('continued before the reset')) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.ok(logs.some((message) => message.includes('continued before the reset')), JSON.stringify(logs));
+  assert.equal(calls.filter((call) => call.method === 'cards.setBadge').at(-1)?.params.badge, null);
+  assert.ok(!calls.some((call) => call.method === 'sessions.send' || call.method === 'sessions.dismiss'));
 });

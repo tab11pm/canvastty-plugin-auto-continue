@@ -18,6 +18,8 @@ export const DEFAULTS = {
   // CanvasTTY caches limits for 60 s: a stop seen just now may not be in the snapshot yet.
   lookupRetryMs: 70_000,
   lookupSlowMs: 5 * 60_000,
+  // Lookups without an exhausted window before the stop is taken for a false one (about half an hour).
+  maxLookups: 8,
   // How long a sent resume may stay without a new turn before the screen is checked again.
   verifyMs: 90_000,
   retryMs: 5 * 60_000,
@@ -100,7 +102,8 @@ export function badgeFor(resetAt, locale = 'en', now = Date.now()) {
 
 /**
  * The next step of one job, given its card as the host reports it.
- * Jobs: `{ cardId, agent, phase: 'locating' | 'waiting' | 'sent', due, resetAt, lookups, attempts, sentAt? }`.
+ * Jobs: `{ cardId, agent, phase: 'locating' | 'waiting' | 'sending' | 'sent', due, resetAt, lookups, attempts, sentAt? }`;
+ * `sending` covers the host calls of one resume, so the turn it starts is not taken for the person's.
  */
 export function nextAction(job, card, screen, now, options = DEFAULTS) {
   if (!card || card.exitCode != null) return { kind: 'drop', reason: 'card closed or agent exited' };
@@ -108,7 +111,10 @@ export function nextAction(job, card, screen, now, options = DEFAULTS) {
     // A turn started before the reset (the person continued): theirs now.
     if (card.status === 'working') return { kind: 'drop', reason: 'continued before the reset' };
     if (now < job.due) return { kind: 'wait' };
-    if (job.phase === 'locating') return { kind: 'locate' };
+    if (job.phase === 'locating') {
+      // No provider window is full: the banner was output that only looked like one.
+      return job.lookups >= options.maxLookups ? { kind: 'drop', reason: 'no exhausted limit window found' } : { kind: 'locate' };
+    }
     if (job.attempts >= options.maxAttempts) return { kind: 'give-up' };
     if (card.status === 'needs_approval') return { kind: 'retry', reason: 'card waits for an approval' };
     return { kind: showsLimitMenu(screen) ? 'dismiss-and-send' : 'send' };
@@ -167,11 +173,25 @@ function service() {
     save();
   }
 
+  /** Ends a job and clears its badge (or shows `badge`). */
+  function endJob(job, kind, reason, badge = null) {
+    delete jobs[job.cardId];
+    if (cards.has(job.cardId)) setBadge(job.cardId, badge);
+    log(`"${job.title}": ${kind}${reason ? ` (${reason})` : ''}`, kind === 'give-up' ? 'warn' : 'info');
+  }
+
   /** Session events: a working -> idle change that ends in a limit banner is a stop. */
   function observe(type, summary, screen) {
     const previous = cards.get(summary.id);
     if (type === 'closed') { cards.delete(summary.id); return; }
     cards.set(summary.id, { summary, screen: screen ?? previous?.screen ?? '' });
+    const job = jobs[summary.id];
+    // A turn started before the reset is the person's, however short: ticks alone could miss it.
+    if (job && summary.status === 'working' && (job.phase === 'locating' || job.phase === 'waiting')) {
+      endJob(job, 'drop', 'continued before the reset');
+      save();
+      return;
+    }
     if (!AGENTS.has(summary.provider) || jobs[summary.id] || summary.status !== 'idle') return;
     if (options.testCardTitle && summary.title === options.testCardTitle && !tested.has(summary.id)) {
       tested.add(summary.id);
@@ -206,6 +226,8 @@ function service() {
     } catch (error) {
       log(`limits.get: ${error.message}`, 'warn');
     }
+    // The person continued while the lookup ran: the job is gone, and so is its badge.
+    if (jobs[job.cardId] !== job) return;
     const now = Date.now();
     if (resetAt === null) {
       job.lookups += 1;
@@ -229,11 +251,9 @@ function service() {
       changed = true;
       if (action.kind === 'locate') { await locate(job); continue; }
       if (action.kind === 'drop' || action.kind === 'done' || action.kind === 'give-up') {
-        delete jobs[job.cardId];
-        if (card) await setBadge(job.cardId, action.kind === 'give-up'
+        endJob(job, action.kind, action.reason, action.kind === 'give-up'
           ? { text: locale === 'ru' ? 'не продолжилось' : 'resume failed', tone: 'error', tooltip: `${job.attempts} attempts` }
           : null);
-        log(`"${job.title}": ${action.kind}${action.reason ? ` (${action.reason})` : ''}`, action.kind === 'give-up' ? 'warn' : 'info');
         continue;
       }
       if (action.kind === 'retry') {
@@ -245,6 +265,7 @@ function service() {
         log(`"${job.title}": retry ${job.attempts}/${options.maxAttempts} (${action.reason})`);
         continue;
       }
+      job.phase = 'sending';
       if (action.kind === 'dismiss-and-send') {
         const dismissed = await request('sessions.dismiss', { sessionId: job.cardId }).catch((error) => ({ dismissed: false, reason: error.message }));
         if (!dismissed.dismissed) log(`"${job.title}": limit menu not dismissed: ${dismissed.reason ?? 'unknown'}`, 'warn');
@@ -259,6 +280,7 @@ function service() {
         log(`"${job.title}": resume typed into its card (${result.delivery?.stage ?? 'sent'})`);
         await setBadge(job.cardId, { text: locale === 'ru' ? '▶ продолжаю' : '▶ resuming', tone: 'info' });
       } else {
+        job.phase = 'waiting';
         job.attempts += 1;
         job.due = Date.now() + options.retryMs;
         log(`"${job.title}": resume not delivered (${result.error ?? result.delivery?.reason ?? 'composer not ready'}); attempt ${job.attempts}`, 'warn');
@@ -295,6 +317,8 @@ function service() {
     try {
       const saved = await request('storage.get', { key: 'state' });
       if (saved?.jobs && typeof saved.jobs === 'object') jobs = saved.jobs;
+      // A resume cut short by a restart is tried again.
+      for (const job of Object.values(jobs)) if (job.phase === 'sending') job.phase = 'waiting';
     } catch (error) {
       log(`loading state: ${error.message}`, 'warn');
     }
